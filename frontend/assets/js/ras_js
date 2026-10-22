@@ -1,0 +1,1084 @@
+/* =====================================================
+   CONFIG
+===================================================== */
+
+//const API_BASE = 'ajax_folders.php';
+const PROCESS_API_BASE = 'http://localhost:8000';
+
+/* =====================================================
+   ESTADO
+===================================================== */
+
+let currentYear   = null;
+let currentMonth  = null;
+let currentDay    = null;
+let currentClient = null;
+
+let selectedFiles     = [];
+let generatedReports  = {};
+
+let _currentPdfUrl      = null;
+let _currentPdfFilename = null;
+let _pdfDoc             = null;
+let _pdfPage            = 1;
+let _pdfRendering       = false;
+let _pdfBaseScale       = 1.0;
+let _pdfZoom            = 1.0;
+let _reloadAfterPdfClose = false;
+
+/* =====================================================
+   PDF.js
+===================================================== */
+
+let _pdfjsLib = null;
+
+async function saveServerFile(file) {
+
+    const response = await fetch(`${PROCESS_API_BASE}/files/save`, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            year: currentYear,
+            month: currentMonth,
+            day: currentDay,
+            client: currentClient,
+            filename: file.name
+        })
+    });
+
+    if (!response.ok) {
+        throw new Error(`Erro ao guardar ficheiro (${response.status})`);
+    }
+
+    return await response.json();
+}
+
+/* =====================================================
+   OPEN PDF
+===================================================== */
+
+async function openPdfModal(pdfFilename) {
+    _currentPdfFilename = pdfFilename;
+    _currentPdfUrl = `${PROCESS_API_BASE}/process/download-pdf/${encodeURIComponent(pdfFilename)}`;
+    _pdfPage      = 1;
+    _pdfZoom      = 1.0;
+    _pdfDoc       = null;
+    _pdfRendering = false;
+
+    document.getElementById( 'pdfModalTitle').textContent = pdfFilename;
+    _updateZoomDisplay();
+    _showState('loading');
+
+    const modalEl = document.getElementById('pdfModal');
+    const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+
+    await new Promise(resolve => {
+
+        const onShown = () => {
+            modalEl.removeEventListener('shown.bs.modal',onShown);
+            resolve();
+        };
+
+        modalEl.addEventListener( 'shown.bs.modal', onShown );
+        modal.show();
+    });
+
+    await _loadAndRenderPdf();
+}
+
+/* =====================================================
+   LOAD PDF
+===================================================== */
+
+async function _loadAndRenderPdf() {
+
+    try {
+
+        const lib = await _getPdfjsLib();
+
+        const resp = await fetch(_currentPdfUrl);
+            
+
+        if (!resp.ok) {
+
+            throw new Error(
+                `HTTP ${resp.status}`
+            );
+        }
+
+        const buffer =
+            await resp.arrayBuffer();
+
+        _pdfDoc =
+            await lib
+                .getDocument({
+                    data : buffer
+                })
+                .promise;
+
+        _showState('ready');
+
+        _updatePageNav();
+
+        await new Promise(r =>
+            requestAnimationFrame(() =>
+                requestAnimationFrame(r)
+            )
+        );
+
+        await _renderPage(1);
+
+    } catch (e) {
+
+        _showState(
+            'error',
+            e.message
+        );
+    }
+}
+
+/* =====================================================
+   RENDER PDF PAGE
+===================================================== */
+
+async function _renderPage(pageNum) {
+
+    if (!_pdfDoc) return;
+
+    if (_pdfRendering) return;
+
+    _pdfRendering = true;
+
+    try {
+
+        const page =
+            await _pdfDoc.getPage(pageNum);
+
+        const canvas =
+            document.getElementById('pdfCanvas');
+
+        const ctx =
+            canvas.getContext('2d');
+
+        const container =
+            document.getElementById(
+                'pdfViewerContainer'
+            );
+
+        const rawW =
+            container.clientWidth ||
+            document.querySelector('.modal-dialog')?.clientWidth ||
+            800;
+
+        const containerW =
+            rawW - 32;
+
+        const viewport1 =
+            page.getViewport({
+                scale : 1
+            });
+
+        _pdfBaseScale =
+            containerW / viewport1.width;
+
+        const finalScale =
+            _pdfBaseScale * _pdfZoom;
+
+        const viewport =
+            page.getViewport({
+                scale : finalScale
+            });
+
+        canvas.width  = viewport.width;
+        canvas.height = viewport.height;
+
+        await page.render({ canvasContext : ctx,viewport }).promise;
+
+        _pdfPage = pageNum;
+
+    } finally {
+
+        _pdfRendering = false;
+
+        _updatePageNav();
+
+        _updateZoomDisplay();
+    }
+}
+
+/* =====================================================
+   PDF ZOOM
+===================================================== */
+
+async function zoomPdf(delta) {
+
+    if (!_pdfDoc) return;
+
+    while (_pdfRendering) {
+
+        await new Promise(r =>
+            setTimeout(r, 40)
+        );
+    }
+
+    if (delta === 0) {
+
+        _pdfZoom = 1.0;
+
+    } else {
+
+        _pdfZoom = Math.max(
+            0.5,
+            Math.min(3.0, _pdfZoom + delta)
+        );
+    }
+
+    await _renderPage(_pdfPage);
+}
+
+function _updateZoomDisplay() {
+
+    const el =
+        document.getElementById('zoomLevel');
+
+    if (el) {
+
+        el.textContent =
+            Math.round(_pdfZoom * 100) + '%';
+    }
+}
+
+/* =====================================================
+   PAGE NAV
+===================================================== */
+
+async function changePage(delta) {
+
+    if (!_pdfDoc) return;
+    while (_pdfRendering) {
+        await new Promise(r => setTimeout(r, 40)
+        );
+    }
+
+    const next =  _pdfPage + delta;
+    if (
+        next < 1 || next > _pdfDoc.numPages
+    ) {
+        return;
+    }
+
+    await _renderPage(next);
+}
+
+function _updatePageNav() {
+
+    if (!_pdfDoc) return;
+
+    const total = _pdfDoc.numPages;
+
+    const info = document.getElementById(  'pdfPageInfo' );
+    const prev = document.getElementById('btnPrevPage');
+    const next = document.getElementById( 'btnNextPage');
+        
+           
+        
+
+    if (info) {
+        info.textContent =  `Pág. ${_pdfPage} / ${total}`;
+    }
+
+    if (prev) {
+        prev.disabled =  _pdfPage <= 1;
+    }
+
+    if (next) {
+
+        next.disabled = _pdfPage >= total;
+    }
+            
+}
+
+/* =====================================================
+   PDF STATES
+===================================================== */
+
+function _showState(state, msg) {
+
+    const loading =  document.getElementById( 'pdfLoading' );
+    const container = document.getElementById( 'pdfViewerContainer'   );
+    const error = document.getElementById('pdfError' );
+    const errorMsg =document.getElementById('pdfErrorMsg');
+        
+        
+
+    if (loading) {
+        loading.style.display = 'none';
+    }
+
+    if (container) {
+        container.style.display = 'none';
+    }
+
+    if (error) {
+        error.classList.add('d-none');
+    }
+
+    if (state === 'loading') {
+        if (loading) {
+            loading.style.display = 'flex';
+        }
+
+    } else if (state === 'ready') {
+
+        if (container) {
+            container.style.display = 'block';
+        }
+
+    } else if (state === 'error') {
+
+        if (error) {
+            error.classList.remove('d-none');
+        }
+
+        if (errorMsg) {
+            errorMsg.textContent =
+                msg || 'Erro ao carregar PDF.';
+        }
+    }
+}
+
+/* =====================================================
+   INIT
+===================================================== */
+
+document.addEventListener(
+    'DOMContentLoaded',
+    () => {
+
+        loadYears();
+        initTheme();
+
+        const pdfModal = document.getElementById( 'pdfModal');
+           
+        if (pdfModal) {
+
+            pdfModal.addEventListener(
+                'hidden.bs.modal',
+                () => {
+                    _pdfDoc       = null;
+                    _pdfPage      = 1;
+                    _pdfRendering = false;
+                    _pdfZoom      = 1.0;
+
+                    const canvas =document.getElementById('pdfCanvas');
+                        
+
+                    if (canvas) {
+
+                        const ctx =
+                            canvas.getContext('2d');
+
+                        ctx.clearRect( 0, 0, canvas.width,canvas.height);
+
+                        canvas.width  = 0;
+                        canvas.height = 0;
+                    }
+
+                    _showState('loading');
+
+                    _updateZoomDisplay();
+                }
+            );
+        }
+
+        const toggle =
+            document.getElementById('sidebar-toggle' );
+           
+        const sidebar = document.getElementById('sidebar' );
+                
+           
+           
+
+        if (toggle && sidebar) {
+
+            let bd = document.querySelector('.sidebar-backdrop');
+
+            if (!bd) {
+
+                bd =
+                    document.createElement('div');
+
+                bd.className =
+                    'sidebar-backdrop';
+
+                document.body.appendChild(bd);
+            }
+
+            toggle.addEventListener(
+                'click',
+                () => {
+
+                    sidebar.classList.toggle('open');
+
+                    bd.classList.toggle('show');
+                }
+            );
+
+            bd.addEventListener(
+                'click',
+                () => {
+
+                    sidebar.classList.remove('open');
+
+                    bd.classList.remove('show');
+                }
+            );
+        }
+    }
+);
+
+
+/* =====================================================
+   ANALYSE FILE
+===================================================== */
+
+
+async function analyseFile(
+    path,
+    index,
+    fileName
+) {
+
+    const box =
+        document.getElementById(
+            `reportBox_${index}`
+        );
+
+    if (!box) {
+        return;
+    }
+
+    box.innerHTML = `
+        <div class="process-box">
+
+            <div
+                class="process-step"
+                id="stage1_${index}"
+            >
+                <span class="step-label">
+                    Salvando áudio
+                </span>
+
+                <span class="step-status">
+                    Pendente
+                </span>
+            </div>
+
+            <div
+                class="process-step"
+                id="stage2_${index}"
+            >
+                <span class="step-label">
+                    Transcrição com Whisper
+                </span>
+
+                <span class="step-status">
+                    Pendente
+                </span>
+            </div>
+
+            <div
+                class="process-step"
+                id="stage3_${index}"
+            >
+                <span class="step-label">
+                    Análise com Inteligência Artificial
+                </span>
+
+                <span class="step-status">
+                    Pendente
+                </span>
+            </div>
+
+            <div
+                class="process-step"
+                id="stage4_${index}"
+            >
+                <span class="step-label">
+                    Geração do relatório PDF
+                </span>
+
+                <span class="step-status">
+                    Pendente
+                </span>
+            </div>
+
+            <div
+                class="process-step"
+                id="stage5_${index}"
+            >
+                <span class="step-label">
+                    Guardar na base de dados
+                </span>
+
+                <span class="step-status">
+                    Pendente
+                </span>
+            </div>
+
+        </div>
+    `;
+
+    function setStageRunning(stageId) {
+
+        const el =
+            document.getElementById(stageId);
+
+        if (!el) return;
+
+        el.classList.remove(
+            'done',
+            'error'
+        );
+
+        el.classList.add(
+            'running'
+        );
+
+        el.querySelector(
+            '.step-status'
+        ).innerHTML =
+            '<span class="text-warning">Em execução...</span>';
+    }
+
+    function setStageDone(
+        stageId,
+        seconds = 0
+    ) {
+
+        const el =
+            document.getElementById(stageId);
+
+        if (!el) return;
+
+        el.classList.remove(
+            'running',
+            'error'
+        );
+
+        el.classList.add(
+            'done'
+        );
+
+        el.querySelector(
+            '.step-status'
+        ).innerHTML = `
+            <span class="text-success">
+                Concluído em ${seconds}s
+            </span>
+        `;
+    }
+
+    function setStageError(stageId) {
+
+        const el =
+            document.getElementById(stageId);
+
+        if (!el) return;
+
+        el.classList.remove(
+            'running'
+        );
+
+        el.classList.add(
+            'error'
+        );
+
+        el.querySelector(
+            '.step-status'
+        ).innerHTML = `
+            <span class="text-danger">
+                Erro
+            </span>
+        `;
+    }
+
+    const STEP_MAP = {
+        1 : `stage1_${index}`,
+        2 : `stage2_${index}`,
+        3 : `stage3_${index}`,
+        4 : `stage4_${index}`,
+        5 : `stage5_${index}`
+    };
+
+    try {
+
+        showToast(
+            `A analisar: ${fileName}`
+        );
+
+        /* =====================================================
+           ENVIAR CAMINHO DO FICHEIRO
+        ===================================================== */
+
+        /* PASSO 1 - Guardar o ficheiro */
+
+setStageRunning(STEP_MAP[1]);
+
+        const saved = await saveServerFile({
+            name: fileName
+        });
+
+        setStageDone(STEP_MAP[1]);
+
+        /* PASSO 2 - Iniciar processamento */
+
+        const response = await fetch(
+            `${PROCESS_API_BASE}/process/server-file-stream/`,
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    path: saved.path
+                })
+            }
+        );
+
+        if (!response.ok) {
+            throw new Error(`Erro HTTP ${response.status}`);
+        }
+        const reader =
+            response.body.getReader();
+
+        const decoder =
+            new TextDecoder();
+
+        let buffer = '';
+
+        let currentStep = 0;
+
+        /* =====================================================
+           STREAM
+        ===================================================== */
+
+        while (true) {
+
+            const {
+                done,
+                value
+            } = await reader.read();
+
+            if (done) {
+                break;
+            }
+
+            buffer += decoder.decode(
+                value,
+                {
+                    stream : true
+                }
+            );
+
+            const parts =
+                buffer.split('\n\n');
+
+            buffer =
+                parts.pop();
+
+            for (const part of parts) {
+
+                const line =
+                    part.trim();
+
+                if (
+                    !line.startsWith(
+                        'data:'
+                    )
+                ) {
+                    continue;
+                }
+
+                let event;
+
+                try {
+
+                    event =
+                        JSON.parse(
+                            line.replace(
+                                /^data:\s*/,
+                                ''
+                            )
+                        );
+
+                } catch {
+
+                    continue;
+                }
+
+                const stageId =
+                    STEP_MAP[event.step];
+
+                /* =========================
+                   RUNNING
+                ========================= */
+
+                if (
+                    event.status === 'running'
+                    &&
+                    stageId
+                ) {
+
+                    currentStep =
+                        event.step;
+
+                    setStageRunning(
+                        stageId
+                    );
+                }
+
+                /* =========================
+                   DONE
+                ========================= */
+
+                else if (
+                    event.status === 'done'
+                    &&
+                    stageId
+                ) {
+
+                    setStageDone(
+                        stageId,
+                        event.seconds || 0
+                    );
+                }
+
+                /* =========================
+                   SUCCESS
+                ========================= */
+
+                else if (
+                    event.step === 'done'
+                    &&
+                    event.status === 'success'
+                ) {
+
+                    generatedReports[index] =
+                        event.pdf;
+
+                    renderReportButton(
+                        index,
+                        event.pdf
+                    );
+
+                    showToast(
+                        `${fileName} analisado com sucesso`
+                    );
+                }
+
+                /* =========================
+                   ERROR
+                ========================= */
+
+                else if (
+                    event.status === 'error'
+                ) {
+
+                    if (
+                        currentStep
+                        &&
+                        STEP_MAP[currentStep]
+                    ) {
+
+                        setStageError(
+                            STEP_MAP[currentStep]
+                        );
+                    }
+
+                    throw new Error(
+                        event.message ||
+                        'Erro no processamento'
+                    );
+                }
+            }
+        }
+
+    } catch (e) {
+
+        console.error(e);
+
+        showToast(
+            `Erro em ${fileName}`,
+            'error'
+        );
+
+        box.innerHTML += `
+            <div class="alert alert-danger mt-2">
+                ${e.message}
+            </div>
+        `;
+    }
+}
+
+/* =====================================================
+   REPORT BUTTON
+===================================================== */
+
+function renderReportButton(
+    index,
+    pdfFilename
+) {
+
+    const box =
+        document.getElementById(
+            `reportBox_${index}`
+        );
+
+    if (!box) {
+        return;
+    }
+
+    box.innerHTML = `
+        <button
+            class="btn btn-success btn-sm"
+            onclick="openPdfModal('${pdfFilename}')"
+        >
+            <i class="bi bi-file-earmark-pdf"></i>
+            Ver Relatório
+        </button>
+    `;
+}
+
+/* =====================================================
+   TOAST
+===================================================== */
+
+let _toastInst = null;
+
+function showToast(
+    msg,
+    type = 'success'
+) {
+
+    const el =
+        document.getElementById(
+            'appToast'
+        );
+
+    if (!el) return;
+
+    document.getElementById(
+        'toastMsg'
+    ).textContent = msg;
+
+    el.className =
+        `toast align-items-center border-0 app-toast ${type}`;
+
+    if (!_toastInst) {
+
+        _toastInst =
+            new bootstrap.Toast(el, {
+                delay : 3500
+            });
+    }
+
+    _toastInst.show();
+}
+
+/* =====================================================
+   THEME
+===================================================== */
+
+function confirmLogout() {
+
+    const modalEl =
+        document.getElementById(
+            'logoutModal'
+        );
+
+    if (modalEl) {
+
+        bootstrap.Modal
+            .getOrCreateInstance(modalEl)
+            .show();
+
+    } else {
+
+        window.location.href =
+            'logout.php';
+    }
+}
+
+function initTheme() {
+
+    const saved =
+        localStorage.getItem(
+            'qa-theme'
+        ) || 'dark';
+
+    applyTheme(saved, false);
+}
+
+function toggleTheme() {
+
+    const current =
+        document.documentElement.getAttribute(
+            'data-theme'
+        ) || 'dark';
+
+    const next =
+        current === 'dark'
+            ? 'light'
+            : 'dark';
+
+    applyTheme(next, true);
+
+    localStorage.setItem(
+        'qa-theme',
+        next
+    );
+}
+
+function applyTheme(
+    theme,
+    animate
+) {
+
+    if (animate) {
+
+        document.documentElement.style.transition =
+            'background .3s, color .3s';
+
+        setTimeout(() => {
+
+            document.documentElement.style.transition = '';
+
+        }, 400);
+    }
+
+    document.documentElement.setAttribute(
+        'data-theme',
+        theme
+    );
+
+    const icon =
+        document.getElementById(
+            'themeIcon'
+        );
+
+    if (icon) {
+
+        icon.className =
+            theme === 'dark'
+                ? 'bi bi-moon-fill'
+                : 'bi bi-sun-fill';
+    }
+}
+
+/* =====================================================
+   ESCAPE HTML
+===================================================== */
+
+function escapeHtml(text) {
+
+    return String(text).replace(
+        /[&<>"']/g,
+        m => ({
+            '&' : '&amp;',
+            '<' : '&lt;',
+            '>' : '&gt;',
+            '"' : '&quot;',
+            "'" : '&#039;'
+        })[m]
+    );
+}
+
+const ctx = document.getElementById("analysisChart");
+
+const chart = new Chart(ctx, {
+
+    type: 'line',
+
+    data: {
+
+        labels:[],
+
+        datasets:[{
+
+            label:"Análises",
+
+            data:[],
+
+            borderColor:"#2f80ed",
+
+            backgroundColor:"rgba(47,128,237,.12)",
+
+            fill:true,
+
+            tension:.4,
+
+            borderWidth:3,
+
+            pointRadius:0,
+
+            pointHoverRadius:6
+
+        }]
+
+    },
+
+    options:{
+
+        responsive:true,
+
+        maintainAspectRatio:false,
+
+        plugins:{
+
+            legend:{
+                display:false
+            }
+
+        },
+
+        scales:{
+
+            x:{
+
+                grid:{
+                    display:false
+                }
+
+            },
+
+            y:{
+
+                beginAtZero:true
+
+            }
+
+        }
+
+    }
+
+});
+
+
+async function carregarGrafico(){
+
+    const response = await fetch("http://localhost:8000/dashboard");
+
+    const dados = await response.json();
+
+    chart.data.labels = dados.labels;
+
+    chart.data.datasets[0].data = dados.analises;
+
+    chart.update();
+
+}
+
+carregarGrafico();
