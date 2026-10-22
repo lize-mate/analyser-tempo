@@ -265,7 +265,7 @@ include 'includes/header.php';
             <div class="val val-green" id="kpiBoasVal"><?= $pctBoas ?>%</div>
             <div class="sub" id="kpiBoasSub"><?= $boas ?> ficheiros</div>
             <div class="kpi-meaning" style="color: var(--green);">
-                <i class="bi bi-patch-check-fill"></i> ≥ 80% conformidade
+                <i class="bi bi-patch-check-fill"></i>Agentes com desempenho ≥ 80% 
             </div>
         </div>
     </div>
@@ -277,7 +277,7 @@ include 'includes/header.php';
             <div class="val val-amber" id="kpiAceitaveisVal"><?= $pctAceitaveis ?>%</div>
             <div class="sub" id="kpiAceitaveisSub"><?= $aceitaveis ?> ficheiros</div>
             <div class="kpi-meaning" style="color: var(--amber);">
-                <i class="bi bi-patch-exclamation-fill"></i> 60% a 79% conformidade
+                <i class="bi bi-patch-exclamation-fill"></i>Agentes com desempenho entre 60% e 79%
             </div>
         </div>
     </div>
@@ -289,7 +289,7 @@ include 'includes/header.php';
             <div class="val val-red" id="kpiCriticasVal"><?= $pctCriticas ?>%</div>
             <div class="sub" id="kpiCriticasSub"><?= $criticas ?> ficheiros</div>
             <div class="kpi-meaning" style="color: var(--red);">
-                <i class="bi bi-patch-minus-fill"></i> &lt; 60% conformidade
+                <i class="bi bi-patch-minus-fill"></i> &lt; Agentes com desempenho 60% 
             </div>
         </div>
      </div>

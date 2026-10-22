@@ -31,7 +31,7 @@ TEXT_HOST  = os.getenv("TEXT_HOST", "192.168.4.55").strip()
 TEXT_PORT  = int(os.getenv("TEXT_PORT", "22").strip() or "22")
 TEXT_USER  = os.getenv("TEXT_USER", "hjit").strip()
 TEXT_PASS  = os.getenv("TEXT_PASS", "*Support2026#").strip()
-TEXT_DIR   = os.getenv("TEXT_DIR", "~/transcricoes").strip()
+TEXT_DIR   = os.getenv("TEXT_DIR", "~/text_files").strip()
 
 PDF_HOST   = os.getenv("PDF_HOST", "192.168.4.55").strip()
 PDF_PORT   = int(os.getenv("PDF_PORT", "22").strip() or "22")
@@ -39,16 +39,16 @@ PDF_USER   = os.getenv("PDF_USER", "hjit").strip()
 PDF_PASS   = os.getenv("PDF_PASS", "*Support2026#").strip()
 PDF_DIR    = os.getenv("PDF_DIR", "/home/hjit/pdf_files").strip()
 
-# ── GROQ AI (OTIMIZADO PARA FREE TIER) ──
+# ── GROQ AI (Mantendo o modelo qwen/qwen3.8-27b do .env) ─
 GROQ_API_KEY     = os.getenv("GROQ_API_KEY", "").strip()
-GROQ_MODEL_REQ   = os.getenv("GROQ_MODEL", "llama3-8b-8192").strip() # ✅ Usa o modelo do .env
+GROQ_MODEL_REQ   = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b").strip() 
 GROQ_TIMEOUT     = int(os.getenv("GROQ_TIMEOUT", "180"))
 GROQ_URL         = "https://api.groq.com/openai/v1/chat/completions"
 
 MIN_TRANSCRIPT_CHARS = int(os.getenv("MIN_TRANSCRIPT_CHARS", "80"))
 MAX_TRANSCRIPT_CHARS = int(os.getenv("MAX_TRANSCRIPT_CHARS", "8000"))
 MAX_RETRY_ATTEMPTS   = int(os.getenv("MAX_RETRY_ATTEMPTS", "3"))
-SYNC_INTERVAL        = int(os.getenv("SYNC_INTERVAL", "120")) # Aumentado para poupar tokens
+SYNC_INTERVAL        = int(os.getenv("SYNC_INTERVAL", "120")) 
 
 CHUNK = 64 * 1024
 STORAGE       = BASE / "storage"
@@ -64,13 +64,8 @@ _analysis_queue = Queue()
 _running = set()
 _STATE = {"resolved_model": None, "model_detection_done": False, "total_analysed": 0, "total_failed": 0}
 
-# ✅ Lista atualizada com modelos ativos no tier gratuito da Groq
-MODEL_CANDIDATES = [
-    GROQ_MODEL_REQ, 
-    "llama3-8b-8192", 
-    "llama-3.1-8b-versatile", 
-    "gemma2-9b-it"
-]
+# ✅ Lista simplificada com apenas o modelo do .env
+MODEL_CANDIDATES = [GROQ_MODEL_REQ]
 
 DEFAULT_WEIGHTS = {
     "opening_and_compliance": 0.15, 
@@ -113,7 +108,7 @@ def list_text_files():
 def list_pdf_files():
     ssh = _connect_text()
     try:
-        sftp = ssh.open_sftp(); rdir =  remote_pdf_dir(ssh); files = []
+        sftp = ssh.open_sftp(); rdir = _remote_pdf_dir(ssh); files = []
         try: sftp.stat(rdir)
         except IOError:
             try: sftp.mkdir(rdir)
@@ -121,7 +116,7 @@ def list_pdf_files():
         for attr in sftp.listdir_attr(rdir):
             if stat.S_ISDIR(attr.st_mode or 0) or not attr.filename.lower().endswith(".pdf"): continue
             stem = PurePosixPath(attr.filename).stem
-            m = re.match(r"^(.+?) relatorio \d{8} \d{6}$", stem)
+            m = re.match(r"^(.+?)_relatorio_\d{8}_\d{6}$", stem)
             original_stem = m.group(1) if m else stem
             files.append({"name": attr.filename, "audio": original_stem, "text_filename": original_stem, "size": attr.st_size or 0, "modified": datetime.fromtimestamp(attr.st_mtime or 0).strftime("%Y-%m-%d %H:%M:%S"), "modified_ts": attr.st_mtime or 0, "view": f"/pdfs/view/{attr.filename}", "download": f"/pdfs/download/{attr.filename}"})
         sftp.close(); return sorted(files, key=lambda f: f["modified_ts"], reverse=True)
@@ -135,20 +130,37 @@ def load_analyses() -> dict:
 def save_analyses(data: dict):
     tmp = ANALYSES_FILE.with_suffix(".tmp"); tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2)); os.replace(tmp, ANALYSES_FILE)
 
-# ── GROQ AI ──
+# ─ GROQ AI (OTIMIZADO PARA EVITAR 429 SEM MUDAR MODELO) ─
 async def _call_groq(prompt: str) -> str:
     if not GROQ_API_KEY or not _STATE["resolved_model"]: raise RuntimeError("Groq não configurado")
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": _STATE["resolved_model"], "messages": [{"role": "system", "content": "Analista QA. Responda APENAS em JSON válido."}, {"role": "user", "content": prompt}], "temperature": 0.3, "max_tokens": 800} # ✅ CRÍTICO: Reduzido de 4000 para 800
+    
+    # ✅ CRÍTICO: Reduzido para 500 tokens de saída para evitar limite OTPM do Qwen 27B
+    payload = {
+        "model": _STATE["resolved_model"], 
+        "messages": [{"role": "system", "content": "Analista QA. Responda APENAS em JSON válido."}, {"role": "user", "content": prompt}], 
+        "temperature": 0.3, 
+        "max_tokens": 500 
+    }
     
     async with httpx.AsyncClient(timeout=GROQ_TIMEOUT) as client:
         for attempt in range(3):
             try: r = await client.post(GROQ_URL, headers=headers, json=payload)
             except Exception as e: await asyncio.sleep(15 * (attempt + 1)); continue
+            
             if r.status_code == 200: return r.json()["choices"][0]["message"]["content"]
-            if r.status_code in (413, 429) and attempt < 2: await asyncio.sleep(30 * (attempt + 1)); continue
+            
+            # Tratamento específico para 429 com tempo de espera maior
+            if r.status_code == 429:
+                wait = 60 * (attempt + 1)
+                log.warning(f"⏳ Limite Groq atingido (429). Aguardando {wait}s antes do retry #{attempt+1}...")
+                await asyncio.sleep(wait)
+                continue
+                
+            if r.status_code == 413 and attempt < 2: await asyncio.sleep(30 * (attempt + 1)); continue
+            
             raise RuntimeError(f"Groq HTTP {r.status_code}: {r.text[:300]}")
-        raise RuntimeError("Falha após 3 tentativas")
+        raise RuntimeError("Falha após 3 tentativas devido a limites da API")
 
 def analyze_file(filename: str):
     if filename in _running: return
@@ -163,7 +175,6 @@ def analyze_file(filename: str):
         if len(text.strip()) < MIN_TRANSCRIPT_CHARS: raise ValueError("Transcrição curta demais")
         raw_response = asyncio.run(_call_groq(text[:MAX_TRANSCRIPT_CHARS]))
         
-        # Extrair JSON básico (fallback simples para manter o código conciso)
         start, end = raw_response.find("{"), raw_response.rfind("}")
         json_block = json.loads(raw_response[start:end+1]) if start != -1 and end != -1 else {"overall_score": {"final_percentage": 70}}
         pct = float(json_block.get("overall_score", {}).get("final_percentage", 70))
@@ -175,7 +186,7 @@ def analyze_file(filename: str):
             all_a = load_analyses(); all_a[filename] = result; save_analyses(all_a)
         _STATE["total_analysed"] += 1; log.info("✓ Concluída: %s → %.1f%%", filename, pct)
     except Exception as e:
-        log.error("✗ Falhou (%s): %s", filename, e)
+        log.error(" Falhou (%s): %s", filename, e)
         with _a_lock:
             all_a = load_analyses(); all_a[filename] = {"estado": "falhou", "motivo": str(e), "analyzed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}; save_analyses(all_a)
         _STATE["total_failed"] += 1
@@ -185,7 +196,12 @@ def _analysis_worker():
     while True:
         try: name = _analysis_queue.get(timeout=1)
         except Empty: continue
-        if _STATE["resolved_model"]: analyze_file(name); time.sleep(3)
+        
+        if _STATE["resolved_model"]: 
+            analyze_file(name)
+            # ✅ CRÍTICO: Aumentado para 10s entre análises para respeitar o limite RPM da Groq
+            time.sleep(10) 
+            
         _analysis_queue.task_done()
 
 threading.Thread(target=_analysis_worker, daemon=True).start()
@@ -195,14 +211,16 @@ def sync_remote_transcriptions():
     try: files = list_text_files()
     except: return
     with _a_lock: analyses = load_analyses()
+    new_count = 0
     for f in files:
         name = f["name"]; entry = analyses.get(name)
         if (not entry or (entry.get("estado") == "falhou" and entry.get("attempts", 0) < MAX_RETRY_ATTEMPTS)) and name not in _running:
-            _analysis_queue.put(name); log.info("↓ Novo na fila: %s", name)
+            _analysis_queue.put(name); new_count += 1
+    
+    if new_count > 0: log.info("↓ %d novos ficheiros adicionados à fila", new_count)
 
 def daemon_loop():
     if GROQ_API_KEY:
-        # Detecção simples usando o modelo definido no .env
         _STATE["resolved_model"] = GROQ_MODEL_REQ; _STATE["model_detection_done"] = True
         log.info("✓ Modelo resolvido via .env: %s", GROQ_MODEL_REQ)
     while True:
